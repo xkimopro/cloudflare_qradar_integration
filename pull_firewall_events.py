@@ -85,8 +85,8 @@ if  __name__=="__main__":
 
 
 
-                except:
-                    print("File is not newline delimited json (ndjson).")
+                except Exception as e:
+                    print(e.message, e.args)
             os.remove(local_filename)
 
     
