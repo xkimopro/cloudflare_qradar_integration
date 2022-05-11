@@ -1,0 +1,4 @@
+requests 
+ConfigParser
+google-cloud-storage
+ndjson

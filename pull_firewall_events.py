@@ -1,59 +1,110 @@
-import os, json, ConfigParser,sys, ndjson, datetime , gzip
-from functions import *
+#!/usr/bin/python
+import os, json, ConfigParser,sys, ndjson, datetime \
+, gzip, requests
+from threading import local
+from google.cloud import storage
 
-CLOUDFLARE_BASE_DIR=os.environ["CLOUDFLARE_BASE_DIR"]
+#VARIABLES
 
-EVENT_TYPE = '_'.join(os.path.basename(__file__).split('.')[0].split('_')[1:])
-
+CLOUDFLARE_BASE_DIR="/root/pull_cloudflare_events"
+LAST_EVENT_TIME_FILE="last_event_time.txt"
 config = ConfigParser.ConfigParser()
-config.read(CLOUDFLARE_BASE_DIR + "/config/conf.ini")
-
-BUCKET = config.get(EVENT_TYPE, 'BUCKET')
-JSON_KEY = config.get(EVENT_TYPE, 'JSON_KEY')
-TEST_FILE = config.get(EVENT_TYPE, 'TEST_FILE')
-LAST_EVENT_FILE = config.get(EVENT_TYPE, 'LAST_EVENT_FILE')
-
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"]=CLOUDFLARE_BASE_DIR+'/'+JSON_KEY
-
-# 1 Find latest file
-
-#TESTING
-test_file = gzip.open(CLOUDFLARE_BASE_DIR+'/'+TEST_FILE)
-
-event_list = ndjson.load(test_file)
-
-last_event_datetime = datetime_from_file(LAST_EVENT_FILE) 
+config.read("./conf.ini")
+BUCKET = config.get("cloudflare", 'BUCKET')
+JSON_KEY_PATH = config.get("cloudflare", 'JSON_KEY_PATH')
+QRADAR_URL=config.get("cloudflare",'QRADAR_URL')
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"]=JSON_KEY_PATH
 
 
+#FUNCTIONS
 
-# 2 Find new events
-filtered_event_list = []
-max_datetime = last_event_datetime
-for event in event_list:
-    EdgeEndTimestamp=event['EdgeEndTimestamp']
-    event_datetime = datetime.datetime.strptime(EdgeEndTimestamp, '%Y-%m-%dT%H:%M:%SZ')
-    if event_datetime > last_event_datetime:
-        filtered_event_list.append(event)
-        max_datetime = max(max_datetime,event_datetime)
-
-# No new data
-if len(filtered_event_list) == 0:
-    print("No new events")
-    exit(0)
-
-# Send unique new data to QRadar via HTTP ( One large POST or multiple small POSTS ? )
-for event in filtered_event_list:
-    print(event['EdgeEndTimestamp'])
+def list_blobs(bucket_name):
+    storage_client = storage.Client()
+    blobs = storage_client.list_blobs(bucket_name)
+    return [blob for blob in blobs]
 
 
-# Update the last event datetime to the max event datetime seen on new events
-write_last_event(LAST_EVENT_FILE, str(max_datetime))
+def download_blob(bucket_name, source_blob_name, destination_file_name):
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(source_blob_name)
+    blob.download_to_filename(destination_file_name)
+    print(
+        "Downloaded storage object {} from bucket {} to local file {}.".format(
+            source_blob_name, bucket_name, destination_file_name
+        )
+    )
+
+def is_file(filename):
+    if filename.split('/')[1]!='':
+      return True
+    else:
+      return False
+
+def send_to_qradar(filename):
+    logfile=open(filename,'r')
+    events=logfile.readlines()
+    logfile.close()
+    for event in events:
+        requests.post(QRADAR_URL,data=event)
+
+def post_to_qradar(filename):
+   files={'files': open(filename,'rb')}
+   requests.post(QRADAR_URL,files=files)
+
+def write_to_json(filename):
+   outfile=filename.strip('.log')+'.json'
+   outfile=open(outfile,'a')
+   infile=open(filename,'r')
+   for event in infile.readlines():
+       json.dump(event,outfile)
+   outfile.close()
+   infile.close()
+
+if  __name__=="__main__":
+
+    all_blobs=list_blobs(BUCKET)
+    file_index = 0
+    for blob in all_blobs:
+        if is_file(blob.name): 
+            file_index+=1
+            local_filename="cloudflare_log"+str(file_index)+".ndjson"
+            download_blob(BUCKET,blob.name,local_filename)
+            with open(local_filename,"rw") as local_file:
+                try:
+                    # Try to parse the ndjson file
+                    event_list = ndjson.load(local_file)                
+                    while len(event_list) != 0:
+                        event = event_list.pop()
+                        # Testing 
+                        # requests.post("https://webhook.site/a2d08685-6d49-4819-b33a-eec11aa127c5", json=event )
+                        requests.post(QRADAR_URL, json=event )
 
 
-#        Uncomment to download a specific file by its path locally as test_data.json
-# local_path ='./' + server_json_file.split('/')[-1]
-# download_blob(bucket_name, server_json_file , local_path )
+                    print("Finished")
 
-# blob_metadata(bucket_name, server_json_file)
-# server_json_file_date = blob_modified_date(bucket_name, server_json_file)
-# server_test_folder_date = blob_modified_date(bucket_name, servet_test_folder)
+
+
+                except:
+                    print("File is not newline delimited json (ndjson).")
+            os.remove(local_filename)
+
+    
+#   with open(LAST_EVENT_TIME_FILE,"r") as event_time:
+#       last_event_time=event_time.readline().rstrip()
+#   print int(last_event_time)
+#   print cloudflare_logs
+#   i=0
+#   for cloudflare_log in cloudflare_logs:
+#     i=i+1
+#     print cloudflare_log.name
+#     filename="cloudflare_log"+str(i)+".log"
+#     #download_blob(BUCKET,logs_list[1],filename)
+#     #print logs_list[i]
+#     if is_file(cloudflare_log.name):
+#       download_blob(BUCKET,cloudflare_log.name,filename)
+#       post_to_qradar(filename)
+#       #print type(filename)
+#       event_time=open(LAST_EVENT_TIME_FILE,"w")
+#       event_time.write(str(cloudflare_log.generation))
+#       event_time.close()
